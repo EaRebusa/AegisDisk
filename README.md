@@ -125,12 +125,17 @@ Combines deep filesystem metadata reconstruction with a fallback raw signature c
 ## 🛠️ Building & Installation
 
 ### Quick One-Liner Install & Run (PowerShell as Administrator)
+Download, extract, and launch in one command:
 ```powershell
-# Download latest release binary and execute
+irm https://github.com/EaRebusa/AegisDisk/releases/latest/download/aegisdisk-v0.1.0-windows-x64.zip -OutFile aegis.zip; Expand-Archive aegis.zip -DestinationPath C:\aegis -Force; & C:\aegis\aegisdisk.exe
+```
+
+Or download binary directly:
+```powershell
 irm https://github.com/EaRebusa/AegisDisk/releases/latest/download/aegisdisk.exe -OutFile aegisdisk.exe; .\aegisdisk.exe
 ```
 
-Or clone, build, and launch in a single command:
+Or clone, build, and launch from source:
 ```powershell
 git clone https://github.com/EaRebusa/AegisDisk.git; cd AegisDisk; cargo run --release
 ```
@@ -171,14 +176,7 @@ Launch Windows PowerShell or Windows Terminal as **Administrator**:
 3. **Hardware Failures**: If a drive exhibits physical head clicking or severe motor instability, power off immediately and consult a hardware cleanroom service.
 
 ---
----
 
-PowerShell One-Liner (Fastest & Zero Setup):                                                                                              
-  Users can install and run with one terminal command:                                                                                         
-    irm https://github.com/EaRebusa/aegisdisk/releases/latest/download/aegisdisk-v0.1.0-windows-x64.zip -OutFile aegis.zip; Expand-Archive     
-    aegis.zip -DestinationPath C:\aegis; & C:\aegis\aegisdisk.exe     
-
----
 ## 📄 License
 Licensed under either of:
 * Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
