@@ -155,7 +155,14 @@ Launch Windows PowerShell or Windows Terminal as **Administrator**:
 3. **Hardware Failures**: If a drive exhibits physical head clicking or severe motor instability, power off immediately and consult a hardware cleanroom service.
 
 ---
+---
 
+PowerShell One-Liner (Fastest & Zero Setup):                                                                                              
+  Users can install and run with one terminal command:                                                                                         
+    irm https://github.com/EaRebusa/aegisdisk/releases/latest/download/aegisdisk-v0.1.0-windows-x64.zip -OutFile aegis.zip; Expand-Archive     
+    aegis.zip -DestinationPath C:\aegis; & C:\aegis\aegisdisk.exe     
+
+---
 ## 📄 License
 Licensed under either of:
 * Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
