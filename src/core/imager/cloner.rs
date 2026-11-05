@@ -614,10 +614,23 @@ pub fn run_imaging_session(
 
     // Multi-pass rescue: Pass 1 Fast, Pass 2 Scraping, Pass 3 Retry
     for current_pass in 1..=3 {
+        let (_rescued, bad, pending) = rescue_map.stats();
+        if current_pass > 1 && (pending == 0 && bad == 0) {
+            tracing::info!("All sectors successfully rescued in earlier pass. Finishing imaging.");
+            break;
+        }
+
         rescue_map.current_pass = current_pass;
         let mut pos = 0u64;
 
         while pos < total_bytes {
+            // In Pass 2 (Scraping) and Pass 3 (Retries), fast-forward over sectors already finished
+            if current_pass > 1 {
+                if let Some((BlockStatus::Finished, remaining)) = rescue_map.entry_at(pos) {
+                    pos += remaining.max(1);
+                    continue;
+                }
+            }
             if let Some(ref c) = cancel {
                 if c.load(Ordering::Relaxed) {
                     tracing::info!("Imaging session cancelled by user.");

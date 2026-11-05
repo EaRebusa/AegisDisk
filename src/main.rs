@@ -92,12 +92,18 @@ enum Commands {
 }
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
-
     let cli = Cli::parse();
 
     match cli.command {
         None | Some(Commands::Tui) => {
+            // Isolate tracing output into aegisdisk.log so stdout is never corrupted during TUI rendering
+            if let Ok(log_file) = std::fs::File::create("aegisdisk.log") {
+                let _ = tracing_subscriber::fmt()
+                    .with_writer(log_file)
+                    .with_ansi(false)
+                    .try_init();
+            }
+
             // Launch interactive Ratatui TUI
             let mut terminal = ui::terminal::setup_terminal()?;
             let mut app = ui::app::App::new();
@@ -105,7 +111,17 @@ fn main() -> anyhow::Result<()> {
             ui::terminal::restore_terminal(&mut terminal)?;
             res
         }
-        Some(Commands::List) => {
+        Some(cmd) => {
+            tracing_subscriber::fmt::init();
+            execute_cli_command(cmd)
+        }
+    }
+}
+
+fn execute_cli_command(cmd: Commands) -> anyhow::Result<()> {
+    match cmd {
+        Commands::Tui => unreachable!(),
+        Commands::List => {
             #[cfg(target_os = "windows")]
             {
                 if !hal::windows::is_elevated() {
@@ -140,7 +156,7 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Some(Commands::Health { disk }) => {
+        Commands::Health { disk } => {
             #[cfg(target_os = "windows")]
             {
                 let disks = hal::windows::enumerate_disks();
@@ -211,7 +227,7 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Some(Commands::Scan { disk, chunk_kb, max_blocks }) => {
+        Commands::Scan { disk, chunk_kb, max_blocks } => {
             #[cfg(target_os = "windows")]
             {
                 let disks = hal::windows::enumerate_disks();
@@ -258,7 +274,7 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Some(Commands::FakeCheck { disk, confirm_serial, backup_dir }) => {
+        Commands::FakeCheck { disk, confirm_serial, backup_dir } => {
             #[cfg(target_os = "windows")]
             {
                 let disks = hal::windows::enumerate_disks();
@@ -310,7 +326,7 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Some(Commands::Image { disk, out, mapfile, timeout_ms, max_temp }) => {
+        Commands::Image { disk, out, mapfile, timeout_ms, max_temp } => {
             #[cfg(target_os = "windows")]
             {
                 let disks = hal::windows::enumerate_disks();
@@ -399,7 +415,7 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Some(Commands::Carve { target, out, ssd }) => {
+        Commands::Carve { target, out, ssd } => {
             println!("============================================================");
             println!(" AegisDisk File Carver: {} -> {}", target.display(), out.display());
             println!(" Media Mode: {}", if ssd { "SSD (TRIM zero-bail enabled)" } else { "Rotational HDD" });
@@ -428,7 +444,7 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Some(Commands::Snapshot { disk, out }) => {
+        Commands::Snapshot { disk, out } => {
             #[cfg(target_os = "windows")]
             {
                 println!("[*] Creating partition snapshot for PhysicalDrive{}...", disk);
@@ -446,7 +462,7 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Some(Commands::RestorePartition { disk, file }) => {
+        Commands::RestorePartition { disk, file } => {
             #[cfg(target_os = "windows")]
             {
                 println!("[!] RESTORE WARNING: Overwriting LBA 0-63 on PhysicalDrive{}!", disk);

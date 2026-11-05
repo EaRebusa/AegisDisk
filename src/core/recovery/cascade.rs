@@ -45,6 +45,31 @@ pub struct CascadeRecoveryEngine {
     pub claimed_tracker: Arc<ClaimedLbaTracker>,
 }
 
+fn find_candidate_partition_offsets(boot_buf: &[u8], total_bytes: u64) -> Vec<u64> {
+    let mut offsets = vec![0];
+    if boot_buf.len() >= 512 && boot_buf[510] == 0x55 && boot_buf[511] == 0xAA {
+        for entry_idx in 0..4 {
+            let entry_offset = 0x1BE + (entry_idx * 16);
+            if entry_offset + 16 <= boot_buf.len() {
+                let lba_start = u32::from_le_bytes(
+                    boot_buf[entry_offset + 8..entry_offset + 12].try_into().unwrap_or([0; 4])
+                ) as u64;
+                let byte_offset = lba_start * 512;
+                if byte_offset > 0 && byte_offset < total_bytes && !offsets.contains(&byte_offset) {
+                    offsets.push(byte_offset);
+                }
+            }
+        }
+        for &common_lba in &[63u64, 2048u64] {
+            let byte_offset = common_lba * 512;
+            if byte_offset < total_bytes && !offsets.contains(&byte_offset) {
+                offsets.push(byte_offset);
+            }
+        }
+    }
+    offsets
+}
+
 impl CascadeRecoveryEngine {
     pub fn new(config: CascadeConfig) -> Self {
         Self {
@@ -233,60 +258,102 @@ impl CascadeRecoveryEngine {
         fs::create_dir_all(out_dir)?;
 
         let mut results = Vec::new();
+        let candidate_offsets = find_candidate_partition_offsets(boot_slice, total_bytes);
 
-        // 1. Check for NTFS
-        if let Some(ntfs) = NtfsBootSector::parse(boot_slice) {
-            let mft_start_offset = ntfs.mft_start_lba() * ntfs.bytes_per_sector as u64;
-            let mut record_buf = AlignedBuffer::new(MFT_RECORD_SIZE * 64, 4096);
+        for part_offset in candidate_offsets {
+            let mut part_buf = AlignedBuffer::new(4096, 4096);
+            if part_offset > 0 {
+                if SignatureCarver::direct_read_chunk(handle, part_offset, 4096, &mut part_buf).is_err() {
+                    continue;
+                }
+            } else {
+                part_buf.as_mut_slice()[..4096].copy_from_slice(&boot_slice[..4096]);
+            }
+            let slice = part_buf.as_slice();
 
-            // Read first cluster of MFT records
-            if mft_start_offset < total_bytes
-                && SignatureCarver::direct_read_chunk(handle, mft_start_offset, record_buf.len(), &mut record_buf).is_ok()
-            {
-                let data = record_buf.as_slice();
-                for (idx, chunk) in data.chunks_exact(MFT_RECORD_SIZE).enumerate() {
-                    if let Some(deleted) = parse_mft_record(chunk, idx as u64) {
-                        let entry = deleted.to_undelete_entry(ntfs.sectors_per_cluster as u64);
-                        self.save_undelete_entry_direct(handle, &entry, out_dir, ntfs.bytes_per_sector as u64)?;
-                        results.push(entry);
+            // 1. Check for NTFS
+            if let Some(ntfs) = NtfsBootSector::parse(slice) {
+                let mft_start_offset = part_offset + (ntfs.mft_start_lba() * ntfs.bytes_per_sector as u64);
+                let mut cur_offset = mft_start_offset;
+                let mut total_records_scanned = 0u64;
+                let mut consecutive_empty_chunks = 0;
+                let mut record_buf = AlignedBuffer::new(MFT_RECORD_SIZE * 256, 4096);
+
+                while cur_offset < total_bytes && total_records_scanned < 65536 && consecutive_empty_chunks < 16 {
+                    let n = match SignatureCarver::direct_read_chunk(handle, cur_offset, record_buf.len(), &mut record_buf) {
+                        Ok(bytes) if bytes >= MFT_RECORD_SIZE as u32 => bytes as usize,
+                        _ => break,
+                    };
+                    let mut records_in_chunk = 0;
+                    for chunk in record_buf.as_slice()[..n].chunks_exact(MFT_RECORD_SIZE) {
+                        let rec_id = total_records_scanned;
+                        total_records_scanned += 1;
+                        if &chunk[..4] == b"FILE" {
+                            records_in_chunk += 1;
+                            if let Some(deleted) = parse_mft_record(chunk, rec_id) {
+                                if !deleted.is_directory && deleted.file_size > 0 {
+                                    let mut entry = deleted.to_undelete_entry(ntfs.sectors_per_cluster as u64);
+                                    let part_lba = part_offset / 512;
+                                    if part_lba > 0 {
+                                        entry.lba_ranges = entry.lba_ranges.into_iter()
+                                            .map(|(lba, cnt)| (lba + part_lba, cnt))
+                                            .collect();
+                                    }
+                                    let _ = self.save_undelete_entry_direct(handle, &entry, out_dir, ntfs.bytes_per_sector as u64);
+                                    results.push(entry);
+                                }
+                            }
+                        }
                     }
+                    if records_in_chunk == 0 {
+                        consecutive_empty_chunks += 1;
+                    } else {
+                        consecutive_empty_chunks = 0;
+                    }
+                    cur_offset += n as u64;
                 }
             }
-        }
-        // 2. Check for FAT32
-        else if let Some(fat32) = Fat32BootSector::parse(boot_slice) {
-            if let Some(root_lba) = fat32.cluster_to_lba(fat32.root_cluster) {
-                let root_offset = root_lba * fat32.bytes_per_sector as u64;
-                let mut dir_buf = AlignedBuffer::new(4096, 4096);
-                if root_offset < total_bytes
-                    && SignatureCarver::direct_read_chunk(handle, root_offset, 4096, &mut dir_buf).is_ok()
-                {
-                    for (idx, chunk) in dir_buf.as_slice().chunks_exact(32).enumerate() {
-                        if let Some(entry) = FatDirEntry::parse(chunk) {
-                            if let Some(undel) = entry.to_undelete_entry(&fat32, idx as u64) {
-                                self.save_undelete_entry_direct(handle, &undel, out_dir, fat32.bytes_per_sector as u64)?;
-                                results.push(undel);
+            // 2. Check for FAT32
+            else if let Some(fat32) = Fat32BootSector::parse(slice) {
+                if let Some(root_lba) = fat32.cluster_to_lba(fat32.root_cluster) {
+                    let root_offset = part_offset + (root_lba * fat32.bytes_per_sector as u64);
+                    let mut dir_buf = AlignedBuffer::new(32 * 1024, 4096);
+                    if root_offset < total_bytes
+                        && SignatureCarver::direct_read_chunk(handle, root_offset, dir_buf.len(), &mut dir_buf).is_ok()
+                    {
+                        for (idx, chunk) in dir_buf.as_slice().chunks_exact(32).enumerate() {
+                            if let Some(entry) = FatDirEntry::parse(chunk) {
+                                if let Some(mut undel) = entry.to_undelete_entry(&fat32, idx as u64) {
+                                    let part_lba = part_offset / 512;
+                                    if part_lba > 0 {
+                                        undel.lba_ranges = undel.lba_ranges.into_iter()
+                                            .map(|(lba, cnt)| (lba + part_lba, cnt))
+                                            .collect();
+                                    }
+                                    let _ = self.save_undelete_entry_direct(handle, &undel, out_dir, fat32.bytes_per_sector as u64);
+                                    results.push(undel);
+                                }
                             }
                         }
                     }
                 }
             }
-        }
-        // 3. Check for exFAT
-        else if let Some(exfat) = ExFatBootSector::parse(boot_slice) {
-            if let Some(root_lba) = exfat.cluster_to_lba(exfat.root_dir_cluster) {
-                let root_offset = root_lba * exfat.bytes_per_sector();
-                let mut dir_buf = AlignedBuffer::new(4096, 4096);
-                if root_offset < total_bytes
-                    && SignatureCarver::direct_read_chunk(handle, root_offset, 4096, &mut dir_buf).is_ok()
-                {
-                    // Scan exFAT directory block for deleted files
-                    for (idx, chunk) in dir_buf.as_slice().chunks_exact(32).enumerate() {
-                        if chunk[0] == 0x05 { // Inactive/deleted file record
-                            let mut undel = UndeleteEntry::new(idx as u64, format!("deleted_exfat_{:04}.bin", idx), PathBuf::new(), 4096, false);
-                            undel.add_lba_range(root_lba + idx as u64, 8);
-                            self.save_undelete_entry_direct(handle, &undel, out_dir, exfat.bytes_per_sector())?;
-                            results.push(undel);
+            // 3. Check for exFAT
+            else if let Some(exfat) = ExFatBootSector::parse(slice) {
+                if let Some(root_lba) = exfat.cluster_to_lba(exfat.root_dir_cluster) {
+                    let root_offset = part_offset + (root_lba * exfat.bytes_per_sector());
+                    let mut dir_buf = AlignedBuffer::new(32 * 1024, 4096);
+                    if root_offset < total_bytes
+                        && SignatureCarver::direct_read_chunk(handle, root_offset, dir_buf.len(), &mut dir_buf).is_ok()
+                    {
+                        for (idx, chunk) in dir_buf.as_slice().chunks_exact(32).enumerate() {
+                            if chunk[0] == 0x05 {
+                                let mut undel = UndeleteEntry::new(idx as u64, format!("deleted_exfat_{:04}.bin", idx), PathBuf::new(), 4096, false);
+                                let part_lba = part_offset / 512;
+                                undel.add_lba_range(part_lba + root_lba + idx as u64, 8);
+                                let _ = self.save_undelete_entry_direct(handle, &undel, out_dir, exfat.bytes_per_sector());
+                                results.push(undel);
+                            }
                         }
                     }
                 }
@@ -313,34 +380,99 @@ impl CascadeRecoveryEngine {
         }
 
         let mut results = Vec::new();
+        let candidate_offsets = find_candidate_partition_offsets(&boot_buf, total_bytes);
 
-        // 1. Check NTFS
-        if let Some(ntfs) = NtfsBootSector::parse(&boot_buf) {
-            let mft_start_offset = ntfs.mft_start_lba() * ntfs.bytes_per_sector as u64;
-            if mft_start_offset < total_bytes && file.seek(SeekFrom::Start(mft_start_offset)).is_ok() {
-                let mut mft_buf = vec![0u8; MFT_RECORD_SIZE * 64];
-                if let Ok(n) = file.read(&mut mft_buf) {
-                    for (idx, chunk) in mft_buf[..n].chunks_exact(MFT_RECORD_SIZE).enumerate() {
-                        if let Some(deleted) = parse_mft_record(chunk, idx as u64) {
-                            let entry = deleted.to_undelete_entry(ntfs.sectors_per_cluster as u64);
-                            self.save_undelete_entry_file(file, &entry, out_dir, ntfs.bytes_per_sector as u64)?;
-                            results.push(entry);
+        for part_offset in candidate_offsets {
+            let mut part_boot = vec![0u8; 4096];
+            if part_offset > 0 {
+                if file.seek(SeekFrom::Start(part_offset)).is_err() || file.read(&mut part_boot).unwrap_or(0) < 512 {
+                    continue;
+                }
+            } else {
+                part_boot = boot_buf.clone();
+            }
+
+            // 1. Check NTFS
+            if let Some(ntfs) = NtfsBootSector::parse(&part_boot) {
+                let mft_start_offset = part_offset + (ntfs.mft_start_lba() * ntfs.bytes_per_sector as u64);
+                let mut cur_offset = mft_start_offset;
+                let mut total_records_scanned = 0u64;
+                let mut consecutive_empty_chunks = 0;
+                let mut mft_buf = vec![0u8; MFT_RECORD_SIZE * 256];
+
+                while cur_offset < total_bytes && total_records_scanned < 65536 && consecutive_empty_chunks < 16 {
+                    if file.seek(SeekFrom::Start(cur_offset)).is_err() { break; }
+                    let n = match file.read(&mut mft_buf) {
+                        Ok(bytes) if bytes >= MFT_RECORD_SIZE => bytes,
+                        _ => break,
+                    };
+                    let mut records_in_chunk = 0;
+                    for chunk in mft_buf[..n].chunks_exact(MFT_RECORD_SIZE) {
+                        let rec_id = total_records_scanned;
+                        total_records_scanned += 1;
+                        if &chunk[..4] == b"FILE" {
+                            records_in_chunk += 1;
+                            if let Some(deleted) = parse_mft_record(chunk, rec_id) {
+                                if !deleted.is_directory && deleted.file_size > 0 {
+                                    let mut entry = deleted.to_undelete_entry(ntfs.sectors_per_cluster as u64);
+                                    let part_lba = part_offset / 512;
+                                    if part_lba > 0 {
+                                        entry.lba_ranges = entry.lba_ranges.into_iter()
+                                            .map(|(lba, cnt)| (lba + part_lba, cnt))
+                                            .collect();
+                                    }
+                                    let _ = self.save_undelete_entry_file(file, &entry, out_dir, ntfs.bytes_per_sector as u64);
+                                    results.push(entry);
+                                }
+                            }
+                        }
+                    }
+                    if records_in_chunk == 0 {
+                        consecutive_empty_chunks += 1;
+                    } else {
+                        consecutive_empty_chunks = 0;
+                    }
+                    cur_offset += n as u64;
+                }
+            }
+            // 2. Check FAT32
+            else if let Some(fat32) = Fat32BootSector::parse(&part_boot) {
+                if let Some(root_lba) = fat32.cluster_to_lba(fat32.root_cluster) {
+                    let root_offset = part_offset + (root_lba * fat32.bytes_per_sector as u64);
+                    if root_offset < total_bytes && file.seek(SeekFrom::Start(root_offset)).is_ok() {
+                        let mut dir_buf = vec![0u8; 32 * 1024];
+                        if let Ok(n) = file.read(&mut dir_buf) {
+                            for (idx, chunk) in dir_buf[..n].chunks_exact(32).enumerate() {
+                                if let Some(entry) = FatDirEntry::parse(chunk) {
+                                    if let Some(mut undel) = entry.to_undelete_entry(&fat32, idx as u64) {
+                                        let part_lba = part_offset / 512;
+                                        if part_lba > 0 {
+                                            undel.lba_ranges = undel.lba_ranges.into_iter()
+                                                .map(|(lba, cnt)| (lba + part_lba, cnt))
+                                                .collect();
+                                        }
+                                        let _ = self.save_undelete_entry_file(file, &undel, out_dir, fat32.bytes_per_sector as u64);
+                                        results.push(undel);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
-        }
-        // 2. Check FAT32
-        else if let Some(fat32) = Fat32BootSector::parse(&boot_buf) {
-            if let Some(root_lba) = fat32.cluster_to_lba(fat32.root_cluster) {
-                let root_offset = root_lba * fat32.bytes_per_sector as u64;
-                if root_offset < total_bytes && file.seek(SeekFrom::Start(root_offset)).is_ok() {
-                    let mut dir_buf = vec![0u8; 4096];
-                    if let Ok(n) = file.read(&mut dir_buf) {
-                        for (idx, chunk) in dir_buf[..n].chunks_exact(32).enumerate() {
-                            if let Some(entry) = FatDirEntry::parse(chunk) {
-                                if let Some(undel) = entry.to_undelete_entry(&fat32, idx as u64) {
-                                    self.save_undelete_entry_file(file, &undel, out_dir, fat32.bytes_per_sector as u64)?;
+            // 3. Check exFAT
+            else if let Some(exfat) = ExFatBootSector::parse(&part_boot) {
+                if let Some(root_lba) = exfat.cluster_to_lba(exfat.root_dir_cluster) {
+                    let root_offset = part_offset + (root_lba * exfat.bytes_per_sector());
+                    if root_offset < total_bytes && file.seek(SeekFrom::Start(root_offset)).is_ok() {
+                        let mut dir_buf = vec![0u8; 32 * 1024];
+                        if let Ok(n) = file.read(&mut dir_buf) {
+                            for (idx, chunk) in dir_buf[..n].chunks_exact(32).enumerate() {
+                                if chunk[0] == 0x05 {
+                                    let mut undel = UndeleteEntry::new(idx as u64, format!("deleted_exfat_{:04}.bin", idx), PathBuf::new(), 4096, false);
+                                    let part_lba = part_offset / 512;
+                                    undel.add_lba_range(part_lba + root_lba + idx as u64, 8);
+                                    let _ = self.save_undelete_entry_file(file, &undel, out_dir, exfat.bytes_per_sector());
                                     results.push(undel);
                                 }
                             }
@@ -348,26 +480,32 @@ impl CascadeRecoveryEngine {
                     }
                 }
             }
-        }
-        // 3. Check EXT4 (Superblock at offset 1024)
-        else if total_bytes > EXT4_SUPERBLOCK_OFFSET + 1024 {
-            file.seek(SeekFrom::Start(EXT4_SUPERBLOCK_OFFSET))?;
-            let mut sb_buf = vec![0u8; 1024];
-            if file.read_exact(&mut sb_buf).is_ok() {
-                if let Some(sb) = Ext4Superblock::parse(&sb_buf) {
-                    let sectors_per_block = (sb.block_size / 512) as u64;
-                    // Scan first inode table block
-                    let inode_table_block = (sb.first_data_block + 1) as u64;
-                    let table_offset = inode_table_block * sb.block_size as u64;
-                    if table_offset < total_bytes && file.seek(SeekFrom::Start(table_offset)).is_ok() {
-                        let mut inode_buf = vec![0u8; sb.inode_size as usize * 16];
-                        if let Ok(n) = file.read(&mut inode_buf) {
-                            for (idx, chunk) in inode_buf[..n].chunks_exact(sb.inode_size as usize).enumerate() {
-                                if let Some(inode) = Ext4Inode::parse(chunk, (idx + 1) as u32) {
-                                    if inode.is_deleted && !inode.is_directory && inode.size_bytes > 0 {
-                                        let undel = inode.to_undelete_entry(sectors_per_block, format!("deleted_ext4_inode_{}", inode.inode_number));
-                                        self.save_undelete_entry_file(file, &undel, out_dir, 512)?;
-                                        results.push(undel);
+            // 4. Check EXT4
+            else if total_bytes > part_offset + EXT4_SUPERBLOCK_OFFSET + 1024 {
+                if file.seek(SeekFrom::Start(part_offset + EXT4_SUPERBLOCK_OFFSET)).is_ok() {
+                    let mut sb_buf = vec![0u8; 1024];
+                    if file.read_exact(&mut sb_buf).is_ok() {
+                        if let Some(sb) = Ext4Superblock::parse(&sb_buf) {
+                            let sectors_per_block = (sb.block_size / 512) as u64;
+                            let inode_table_block = (sb.first_data_block + 1) as u64;
+                            let table_offset = part_offset + (inode_table_block * sb.block_size as u64);
+                            if table_offset < total_bytes && file.seek(SeekFrom::Start(table_offset)).is_ok() {
+                                let mut inode_buf = vec![0u8; sb.inode_size as usize * 128];
+                                if let Ok(n) = file.read(&mut inode_buf) {
+                                    for (idx, chunk) in inode_buf[..n].chunks_exact(sb.inode_size as usize).enumerate() {
+                                        if let Some(inode) = Ext4Inode::parse(chunk, (idx + 1) as u32) {
+                                            if inode.is_deleted && !inode.is_directory && inode.size_bytes > 0 {
+                                                let mut undel = inode.to_undelete_entry(sectors_per_block, format!("deleted_ext4_inode_{}", inode.inode_number));
+                                                let part_lba = part_offset / 512;
+                                                if part_lba > 0 {
+                                                    undel.lba_ranges = undel.lba_ranges.into_iter()
+                                                        .map(|(lba, cnt)| (lba + part_lba, cnt))
+                                                        .collect();
+                                                }
+                                                let _ = self.save_undelete_entry_file(file, &undel, out_dir, 512);
+                                                results.push(undel);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -558,5 +696,22 @@ mod tests {
         assert!(!engine.claimed_tracker.is_claimed(120), "BMP sector was not in metadata");
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_candidate_partition_offsets_detects_mbr_and_common() {
+        let mut mbr = vec![0u8; 512];
+        mbr[510] = 0x55;
+        mbr[511] = 0xAA;
+        let part1_entry = 0x1BE;
+        mbr[part1_entry + 4] = 0x07; // NTFS
+        mbr[part1_entry + 8..part1_entry + 12].copy_from_slice(&128u32.to_le_bytes());
+        mbr[part1_entry + 12..part1_entry + 16].copy_from_slice(&2048u32.to_le_bytes());
+
+        let offsets = find_candidate_partition_offsets(&mbr, 100 * 1024 * 1024);
+        assert!(offsets.contains(&0));
+        assert!(offsets.contains(&(128 * 512)));
+        assert!(offsets.contains(&(63 * 512)));
+        assert!(offsets.contains(&(2048 * 512)));
     }
 }

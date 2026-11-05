@@ -60,6 +60,7 @@ pub enum SupportedFileType {
     Flv,
     Mpg,
     Wmv,
+    Doc,
 }
 
 impl SupportedFileType {
@@ -102,6 +103,7 @@ impl SupportedFileType {
             Self::Flv => "flv",
             Self::Mpg => "mpg",
             Self::Wmv => "wmv",
+            Self::Doc => "doc",
         }
     }
 
@@ -144,6 +146,7 @@ impl SupportedFileType {
             "flv" => Some(Self::Flv),
             "mpg" | "mpeg" => Some(Self::Mpg),
             "wmv" => Some(Self::Wmv),
+            "doc" | "xls" | "ppt" => Some(Self::Doc),
             _ => None,
         }
     }
@@ -185,6 +188,7 @@ impl SupportedFileType {
             Self::Flv => b"FLV\x01",
             Self::Mpg => &[0x00, 0x00, 0x01, 0xBA],
             Self::Wmv => &[0x30, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11, 0xA6, 0xD9, 0x00, 0xAA, 0x00, 0x62, 0xCE, 0x6C],
+            Self::Doc => &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1],
         }
     }
 
@@ -227,6 +231,7 @@ impl SupportedFileType {
             Self::Flv => 1024 * 1024 * 1024,  // 1 GB
             Self::Mpg => 1024 * 1024 * 1024,  // 1 GB
             Self::Wmv => 1024 * 1024 * 1024,  // 1 GB
+            Self::Doc => 100 * 1024 * 1024,
         }
     }
 
@@ -561,6 +566,7 @@ impl SignatureCarver {
             SupportedFileType::Flv,
             SupportedFileType::Mpg,
             SupportedFileType::Wmv,
+            SupportedFileType::Doc,
         ];
         if plaintext_gate.min_bytes().is_some() {
             target_types.push(SupportedFileType::Txt);
@@ -1367,6 +1373,9 @@ impl SignatureCarver {
                     }
                 }
                 None
+            }
+            SupportedFileType::Doc => {
+                Some((10 * 1024 * 1024).min((total_bytes.saturating_sub(offset)) as usize))
             }
         }
     }

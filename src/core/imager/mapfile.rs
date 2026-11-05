@@ -197,4 +197,15 @@ impl RescueMap {
 
         (rescued, bad, pending)
     }
+
+    /// Return the block status and remaining bytes within that entry from `pos`.
+    pub fn entry_at(&self, pos: u64) -> Option<(BlockStatus, u64)> {
+        for e in &self.entries {
+            if pos >= e.pos && pos < e.pos + e.size {
+                let remaining = (e.pos + e.size) - pos;
+                return Some((e.status, remaining));
+            }
+        }
+        None
+    }
 }

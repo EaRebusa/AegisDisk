@@ -28,14 +28,15 @@ pub fn render_carver_view(
     disk_number: u32,
     plaintext_gate: crate::core::recovery::carver::PlaintextGate,
 ) {
+    let show_hex = area.height >= 26;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Header
             Constraint::Length(3), // Source & Destination Banner
             Constraint::Length(3), // Live Ticker Gauge
-            Constraint::Min(10),   // Recovered files list table (flexibly expands on tall screens)
-            Constraint::Length(7), // Hex Inspector pane
+            Constraint::Min(4),    // Recovered files list table (flexibly expands on tall screens)
+            Constraint::Length(if show_hex { 7 } else { 0 }), // Hex Inspector pane
             Constraint::Length(3), // Action bar
         ])
         .split(area);
@@ -209,7 +210,9 @@ pub fn render_carver_view(
 
     let hex_para = Paragraph::new(hex_lines)
         .block(Block::default().borders(Borders::ALL).title(" Hex Inspector (Selected Header) "));
-    f.render_widget(hex_para, chunks[4]);
+    if show_hex && chunks[4].height > 0 {
+        f.render_widget(hex_para, chunks[4]);
+    }
 
     // 6. Action bar
     let action_text = if is_editing_dest || is_editing_source {
