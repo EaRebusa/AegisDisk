@@ -1,5 +1,45 @@
 #![allow(dead_code, unused_imports)]
 use std::path::PathBuf;
+use crate::core::recovery::metadata::UndeleteEntry;
+
+#[derive(Debug, Clone)]
+pub struct NtfsBootSector {
+    pub bytes_per_sector: u16,
+    pub sectors_per_cluster: u8,
+    pub mft_lcn: u64,
+    pub mft_mirr_lcn: u64,
+    pub clusters_per_mft_record: i8,
+}
+
+impl NtfsBootSector {
+    pub fn parse(raw: &[u8]) -> Option<Self> {
+        if raw.len() < 512 || &raw[3..11] != b"NTFS    " {
+            return None;
+        }
+
+        let bytes_per_sector = u16::from_le_bytes([raw[0x0B], raw[0x0C]]);
+        let sectors_per_cluster = raw[0x0D];
+        if bytes_per_sector == 0 || sectors_per_cluster == 0 {
+            return None;
+        }
+
+        let mft_lcn = u64::from_le_bytes(raw[0x30..0x38].try_into().unwrap_or([0; 8]));
+        let mft_mirr_lcn = u64::from_le_bytes(raw[0x38..0x40].try_into().unwrap_or([0; 8]));
+        let clusters_per_mft_record = raw[0x40] as i8;
+
+        Some(Self {
+            bytes_per_sector,
+            sectors_per_cluster,
+            mft_lcn,
+            mft_mirr_lcn,
+            clusters_per_mft_record,
+        })
+    }
+
+    pub fn mft_start_lba(&self) -> u64 {
+        self.mft_lcn * self.sectors_per_cluster as u64
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct MftDeletedFile {
@@ -9,6 +49,33 @@ pub struct MftDeletedFile {
     pub is_directory: bool,
     pub resident_data: Option<Vec<u8>>,
     pub data_runs: Vec<MftDataRun>,
+}
+
+impl MftDeletedFile {
+    pub fn to_undelete_entry(&self, sectors_per_cluster: u64) -> UndeleteEntry {
+        let mut entry = UndeleteEntry::new(
+            self.record_number,
+            self.filename.clone(),
+            PathBuf::new(),
+            self.file_size,
+            self.is_directory,
+        );
+
+        if let Some(ref res) = self.resident_data {
+            entry.resident_data = Some(res.clone());
+        }
+
+        for run in &self.data_runs {
+            // Negative LCN indicates a sparse cluster run
+            if run.lcn_offset >= 0 && run.cluster_count > 0 {
+                let start_lba = (run.lcn_offset as u64) * sectors_per_cluster;
+                let sector_count = run.cluster_count * sectors_per_cluster;
+                entry.add_lba_range(start_lba, sector_count);
+            }
+        }
+
+        entry
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -215,4 +282,48 @@ fn decode_data_runs(mut raw: &[u8]) -> Vec<MftDataRun> {
     }
 
     runs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ntfs_boot_sector_parsing() {
+        let mut boot = vec![0u8; 512];
+        boot[3..11].copy_from_slice(b"NTFS    ");
+        boot[0x0B..0x0D].copy_from_slice(&512u16.to_le_bytes()); // 512 bytes per sector
+        boot[0x0D] = 8; // 8 sectors per cluster (4KB)
+        boot[0x30..0x38].copy_from_slice(&786432u64.to_le_bytes()); // MFT cluster 786432
+        boot[0x40] = (-10i8) as u8; // 2^10 = 1024 bytes per record
+
+        let parsed = NtfsBootSector::parse(&boot).expect("Failed to parse NTFS boot sector");
+        assert_eq!(parsed.bytes_per_sector, 512);
+        assert_eq!(parsed.sectors_per_cluster, 8);
+        assert_eq!(parsed.mft_lcn, 786432);
+        assert_eq!(parsed.mft_start_lba(), 786432 * 8);
+    }
+
+    #[test]
+    fn test_mft_to_undelete_entry() {
+        let deleted = MftDeletedFile {
+            record_number: 1234,
+            filename: "calc.exe".to_string(),
+            file_size: 16384,
+            is_directory: false,
+            resident_data: None,
+            data_runs: vec![
+                MftDataRun { cluster_count: 2, lcn_offset: 1000 },
+                MftDataRun { cluster_count: 2, lcn_offset: 2000 },
+            ],
+        };
+
+        let entry = deleted.to_undelete_entry(8);
+        assert_eq!(entry.record_id, 1234);
+        assert_eq!(entry.name, "calc.exe");
+        assert_eq!(entry.file_size, 16384);
+        assert_eq!(entry.lba_ranges.len(), 2);
+        assert_eq!(entry.lba_ranges[0], (8000, 16));
+        assert_eq!(entry.lba_ranges[1], (16000, 16));
+    }
 }

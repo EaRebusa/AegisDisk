@@ -1,5 +1,6 @@
 #![allow(dead_code, unused_imports)]
 use std::path::{Path, PathBuf};
+use crate::core::recovery::metadata::UndeleteEntry;
 
 /// EXT4 Superblock Constants
 pub const EXT4_SUPERBLOCK_OFFSET: u64 = 1024;
@@ -166,6 +167,27 @@ impl Ext4Inode {
             extents,
         })
     }
+
+    /// Convert deleted EXT4 inode extents into a unified UndeleteEntry
+    pub fn to_undelete_entry(&self, sectors_per_block: u64, name: String) -> UndeleteEntry {
+        let mut entry = UndeleteEntry::new(
+            self.inode_number as u64,
+            name,
+            PathBuf::new(),
+            self.size_bytes,
+            self.is_directory,
+        );
+
+        for ext in &self.extents {
+            if !ext.is_unwritten && ext.block_count > 0 {
+                let start_lba = ext.physical_block * sectors_per_block;
+                let sector_count = ext.block_count as u64 * sectors_per_block;
+                entry.add_lba_range(start_lba, sector_count);
+            }
+        }
+
+        entry
+    }
 }
 
 /// Parse linear EXT4 directory block entries (ext4_dir_entry_2)
@@ -265,5 +287,11 @@ mod tests {
         assert_eq!(inode.extents[0].logical_block, 0);
         assert_eq!(inode.extents[0].block_count, 2);
         assert_eq!(inode.extents[0].physical_block, 32768);
+
+        let undelete = inode.to_undelete_entry(8, "app.bin".to_string());
+        assert_eq!(undelete.name, "app.bin");
+        assert_eq!(undelete.file_size, 8192);
+        assert_eq!(undelete.lba_ranges.len(), 1);
+        assert_eq!(undelete.lba_ranges[0], (32768 * 8, 2 * 8));
     }
 }
