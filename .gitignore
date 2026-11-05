@@ -1,0 +1,39 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Development & AI Prompt/Context Specifications (Confidential/Internal)
+GEMINI.md
+*SPEC*.md
+*Draft*.md
+UI_DRAFT.md
+Implementation Draft.md
+
+# IDE and Editor configurations
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+
+# Operating System files
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# AegisDisk Runtime Output & Local Dumps
+/salvaged/
+/backups/
+*.raw
+*.img
+*.dd
+*.vhd
+*.vhdx
+*.map
+*.log
+sim_*.img
