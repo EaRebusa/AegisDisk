@@ -70,13 +70,18 @@
   * `>500ms` (Critical / Pending Failure)
   * `Timeout / Unreadable` (Dead Sector)
 
-### 5. High-Precision Signature File Carver
-Direct-to-disk raw file carving engine running with strict sector alignment. Includes custom structural length calculation rulers (no artificial file size limits or truncated headers):
+### 5. Two-Tier Cascade Recovery Engine (Metadata Undelete + Direct Carver)
+Combines deep filesystem metadata reconstruction with a fallback raw signature carver, orchestrated through an in-memory 64-bit Roaring Bitmap deduplication filter:
+
+* **Tier 1: Metadata Undelete Pass**: Automatically detects **NTFS**, **FAT32**, **exFAT**, and **EXT4** volume boot sectors and MBR partitions. Streams deleted catalog records (parsing `$MFT` non-resident data-runs, UTF-16 Unicode filenames, directory tombstones, and inode extents) to restore intact files with original names, timestamps, and multi-cluster fragment chains.
+* **Claimed LBA Deduplication Filter**: Populates a real-time 64-bit Roaring Bitmap interval map with every physical sector rescued in Tier 1.
+* **Tier 2: High-Precision Direct Carver Pass**: Sweeps remaining unallocated blocks for 34 distinct file signatures, automatically skipping claimed sectors to eliminate duplicate files and accelerate scan throughput.
+* **NTFS Sparse Compaction**: Seamlessly marks recovered files and disk images with `FSCTL_SET_SPARSE` to avoid allocating physical disk space for zero-runs.
 
 | Category | File Types Supported | Size Determination Strategy |
 |:---|:---|:---|
 | **Images** | `JPG`, `PNG`, `BMP`, `GIF`, `WEBP`, `TIFF`, `PCX`, `PSD` | Exact header lengths, dimension rulers, sub-block chunk walks, and marker scans. |
-| **Documents** | `PDF`, `RTF`, `DOCX`, `XLSX`, `PPTX`, `TXT` | Trailer xref parsing, dictionary walks, ZIP central directory inspection, and ASCII entropy gating. |
+| **Documents** | `PDF`, `RTF`, `DOCX`, `XLSX`, `PPTX`, `DOC`, `TXT` | Trailer xref parsing, dictionary walks, OLE CFBF compound headers, ZIP central directory inspection, and ASCII entropy gating. |
 | **Archives** | `ZIP`, `7Z`, `RAR`, `TAR`, `GZ`, `BZ2`, `WIM`, `ISO` | End-of-Central-Directory backward walks, LZMA/Brotli streams, and 48-bit bit-aligned EOS markers. |
 | **Audio** | `MP3`, `WAV`, `FLAC`, `OGG`, `AU`, `WMA` | RIFF chunk structures, frame header bitrate equations, Vorbis comments, and ASF GUID properties. |
 | **Video** | `MP4`, `MKV`, `AVI`, `MOV`, `FLV`, `MPG`, `WMV` | ISOBMFF atom trees (`moov`/`mdat`), Matroska EBML trees, RIFF AVI chunk trees, and MPEG pack streams. |
@@ -91,10 +96,10 @@ Direct-to-disk raw file carving engine running with strict sector alignment. Inc
 
 | Filesystem | Partition & Structure Support | Recovery & Carving Capabilities |
 |:---|:---|:---|
-| **NTFS** | `$MFT` Record Parsing, `$Bitmap` Free Space Skip, Attribute Runlists | Direct Cluster Carving, Deleted MFT Record Scans, Metadata-Assisted Rescue |
-| **exFAT** | Volume Boot Record, FAT Cluster Chains, Allocation Bitmaps | Full-range Direct I/O Carving, File Directory Entry Walking |
-| **FAT32** | BPB, FAT Table, 4GB-bounded Spanning Image Output (`.001`, `.002`) | Unallocated Free-Space Salvage, Multipart Image Writing |
-| **EXT4** | Superblock (`0xEF53`), Inode Table (256B), Extent Trees (`0xF30A`), Directory Blocks (`ext4_dir_entry_2`) | Direct Physical Extent Block Mapping, Deleted Inode Recovery (`dtime > 0`) |
+| **NTFS** | `$MFT` Stream Parsing (up to 64K records), `$Bitmap` Free Space Skip, MBR/GPT Partition Resolution | Two-Tier Cascade Recovery, Non-Resident Cluster Stitching, UTF-16 Unicode Filenames, Recycle Bin (`$R`/`$I`) Splitting |
+| **exFAT** | Volume Boot Record, FAT Cluster Chains, Allocation Bitmaps | Direct LBA Stream Mapping, Inactive File Directory Entry Recovery |
+| **FAT32** | BPB, FAT Table, 4GB-bounded Spanning Image Output (`.001`, `.002`) | Tombstone (`0xE5` -> `_`) Undelete, Cluster Extent Mapping, Spanning Multi-part Writing |
+| **EXT4** | Superblock (`0xEF53`), Inode Table (256B), Extent Trees (`0xF30A`), Directory Blocks (`ext4_dir_entry_2`) | Physical Block-to-Sector Extent Mapping, Inode Scans, Journal Fallback to Raw Carver |
 
 ---
 
@@ -103,10 +108,10 @@ Direct-to-disk raw file carving engine running with strict sector alignment. Inc
 | Key | Context | Action |
 |:---:|:---:|:---|
 | `F1` | Global | Switch to **Dashboard** (Drive inventory, SMART telemetry, controller health) |
-| `F2` | Global | Switch to **Non-Linear Imager** (Phase 1-3 cloning, mapfiles) |
+| `F2` | Global | Switch to **Surface Map** (Interactive real-time latency inspector) |
 | `F3` | Global | Switch to **Fake Storage Prober** (Destructive write-probe verification) |
-| `F4` | Global | Switch to **Surface Map** (Interactive real-time latency inspector) |
-| `F5` | Global | Switch to **Signature Carver** (Direct raw file extraction) |
+| `F4` | Global | Switch to **Non-Linear Imager** (Phase 1-3 cloning, mapfiles, fast early-exit) |
+| `F5` | Global | Switch to **Two-Tier Carver** (Tier 1 Metadata Undelete + Tier 2 Carver) |
 | `Up` / `Down` | Table Views | Smooth scroll selected drives, files, or telemetry rows |
 | `S` | Imager / Carver | Start or resume active scanning session |
 | `P` | Imager / Carver | Pause / unpause running operation |
@@ -119,6 +124,17 @@ Direct-to-disk raw file carving engine running with strict sector alignment. Inc
 
 ## 🛠️ Building & Installation
 
+### Quick One-Liner Install & Run (PowerShell as Administrator)
+```powershell
+# Download latest release binary and execute
+irm https://github.com/EaRebusa/AegisDisk/releases/latest/download/aegisdisk.exe -OutFile aegisdisk.exe; .\aegisdisk.exe
+```
+
+Or clone, build, and launch in a single command:
+```powershell
+git clone https://github.com/EaRebusa/AegisDisk.git; cd AegisDisk; cargo run --release
+```
+
 ### Prerequisites
 * **Windows 10 / 11 / Server 2016+ (x86_64)**
 * **Rust (2024 Edition)**
@@ -127,14 +143,14 @@ Direct-to-disk raw file carving engine running with strict sector alignment. Inc
 ### Build from Source
 ```powershell
 # Clone the repository
-git clone https://github.com/EaRebusa/aegisdisk.git
-cd aegisdisk
+git clone https://github.com/EaRebusa/AegisDisk.git
+cd AegisDisk
 
 # Build an optimized release binary
 cargo build --release
 
-# Run unit and integration tests
-cargo test
+# Run unit and integration tests (23 tests)
+cargo test --target-dir $env:TEMP\aegis_target --lib
 
 # Run EXT4 simulation test suite
 cargo run --example simulate_ext4
