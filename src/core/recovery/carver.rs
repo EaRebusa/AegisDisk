@@ -474,6 +474,8 @@ pub struct SignatureCarver {
     pub max_files: usize,
     pub is_ssd: bool,
     pub plaintext_gate: PlaintextGate,
+    pub claimed_tracker: Option<Arc<crate::core::recovery::metadata::ClaimedLbaTracker>>,
+    pub sparse_enabled: bool,
 }
 
 impl SignatureCarver {
@@ -526,7 +528,19 @@ impl SignatureCarver {
             max_files: usize::MAX,
             is_ssd,
             plaintext_gate,
+            claimed_tracker: None,
+            sparse_enabled: false,
         }
+    }
+
+    pub fn with_claimed_tracker(mut self, tracker: Arc<crate::core::recovery::metadata::ClaimedLbaTracker>) -> Self {
+        self.claimed_tracker = Some(tracker);
+        self
+    }
+
+    pub fn with_sparse(mut self, sparse: bool) -> Self {
+        self.sparse_enabled = sparse;
+        self
     }
 
     /// Direct I/O carving on physical drive with Win32 FILE_FLAG_NO_BUFFERING
@@ -614,6 +628,16 @@ impl SignatureCarver {
 
             let mut i = 0;
             while i < bytes_read.saturating_sub(16) && carved_files.len() < self.max_files {
+                let file_offset = current_offset + i as u64;
+                let current_lba = file_offset / 512;
+                if let Some(ref tracker) = self.claimed_tracker {
+                    if tracker.is_claimed(current_lba) {
+                        let rem = 512 - (i % 512);
+                        i += rem;
+                        continue;
+                    }
+                }
+
                 for &ft in &self.target_types {
                     if ft.matches_at(window, i) {
                         let file_offset = current_offset + i as u64;
@@ -1890,6 +1914,9 @@ impl SignatureCarver {
             }
             Err(e) => return Err(e.into()),
         };
+        if self.sparse_enabled {
+            crate::core::imager::cloner::mark_file_sparse(&out);
+        }
         let mut remaining = size;
         let mut cur_offset = offset;
 
@@ -2021,6 +2048,16 @@ impl SignatureCarver {
 
             let mut i = 0;
             while i < bytes_read.saturating_sub(16) && carved_files.len() < self.max_files {
+                let file_offset = current_offset + i as u64;
+                let current_lba = file_offset / 512;
+                if let Some(ref tracker) = self.claimed_tracker {
+                    if tracker.is_claimed(current_lba) {
+                        let rem = 512 - (i % 512);
+                        i += rem;
+                        continue;
+                    }
+                }
+
                 for &ft in &self.target_types {
                     if ft.matches_at(window, i) {
                         let file_offset = current_offset + i as u64;
@@ -2727,6 +2764,9 @@ impl SignatureCarver {
             }
             Err(e) => return Err(e.into()),
         };
+        if self.sparse_enabled {
+            crate::core::imager::cloner::mark_file_sparse(&out);
+        }
 
         let mut remaining = size;
         let mut buf = vec![0u8; 64 * 1024];
@@ -2916,5 +2956,46 @@ mod tests {
 
         let parsed_size = SignatureCarver::parse_gif_size_slice(&gif);
         assert_eq!(parsed_size, Some(gif.len()), "GIF sub-block parser must navigate past internal 0x3B payload byte to true trailer");
+    }
+
+    #[test]
+    fn test_claimed_lba_skips_signature() {
+        use crate::core::recovery::metadata::ClaimedLbaTracker;
+
+        let temp_dir = std::env::temp_dir().join(format!("carver_claim_test_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+        let test_file = temp_dir.join("image.raw");
+
+        // Construct valid BMP image
+        let mut bmp = vec![0u8; 4096];
+        bmp[0..2].copy_from_slice(b"BM");
+        bmp[2..6].copy_from_slice(&4096u32.to_le_bytes());
+        bmp[6..8].copy_from_slice(&0u16.to_le_bytes());
+        bmp[8..10].copy_from_slice(&0u16.to_le_bytes());
+        bmp[10..14].copy_from_slice(&54u32.to_le_bytes());
+        bmp[14..18].copy_from_slice(&40u32.to_le_bytes());
+        bmp[18..22].copy_from_slice(&32i32.to_le_bytes());
+        bmp[22..26].copy_from_slice(&32i32.to_le_bytes());
+        bmp[26..28].copy_from_slice(&1u16.to_le_bytes());
+        bmp[28..30].copy_from_slice(&24u16.to_le_bytes());
+
+        let mut f = File::create(&test_file).unwrap();
+        f.write_all(&bmp).unwrap();
+        drop(f);
+
+        // Without claimed tracker: recovers 1 BMP
+        let carver_plain = SignatureCarver::new(temp_dir.clone(), false);
+        let res_plain = carver_plain.carve_from_file(&test_file, None, None, None).unwrap();
+        assert_eq!(res_plain.len(), 1, "Must carve BMP when LBA is unclaimed");
+
+        // With claimed tracker claiming LBA 0: skipped completely
+        let tracker = Arc::new(ClaimedLbaTracker::new());
+        tracker.claim_range(0, 8); // claim LBA 0..8
+        let carver_claimed = SignatureCarver::new(temp_dir.clone(), false)
+            .with_claimed_tracker(tracker);
+        let res_claimed = carver_claimed.carve_from_file(&test_file, None, None, None).unwrap();
+        assert_eq!(res_claimed.len(), 0, "Must skip LBA when claimed by metadata recovery");
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }
