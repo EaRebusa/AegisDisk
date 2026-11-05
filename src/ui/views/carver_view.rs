@@ -45,7 +45,7 @@ pub fn render_carver_view(
         Some(p) => format!("Image File: {}", p.display()),
         None => format!("PhysicalDrive{} (Direct I/O Live Media)", disk_number),
     };
-    let header_para = Paragraph::new(format!(" Source Target: {} | Engine: Direct I/O (Win32 Aligned)", source_str))
+    let header_para = Paragraph::new(format!(" Source Target: {} | Engine: Two-Tier Cascade (Metadata Undelete + Direct I/O Carver)", source_str))
         .block(Block::default().borders(Borders::ALL).title(" AegisDisk - Resilient Platter Carver & Parser "));
     f.render_widget(header_para, chunks[0]);
 
@@ -150,7 +150,12 @@ pub fn render_carver_view(
                 };
 
                 let filename = cf.output_path.file_name().unwrap_or_default().to_string_lossy();
-                let status_badge = Span::styled("RECOVERED", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+                let is_metadata = cf.output_path.to_string_lossy().contains("intact_metadata");
+                let status_badge = if is_metadata {
+                    Span::styled("INTACT", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD))
+                } else {
+                    Span::styled("CARVED", Style::default().fg(Color::Green))
+                };
 
                 Row::new(vec![
                     status_badge,

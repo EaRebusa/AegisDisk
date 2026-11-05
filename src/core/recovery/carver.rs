@@ -105,6 +105,49 @@ impl SupportedFileType {
         }
     }
 
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext.to_lowercase().as_str() {
+            "jpg" | "jpeg" => Some(Self::Jpeg),
+            "png" => Some(Self::Png),
+            "gif" => Some(Self::Gif),
+            "bmp" => Some(Self::Bmp),
+            "pdf" => Some(Self::Pdf),
+            "zip" => Some(Self::Zip),
+            "7z" => Some(Self::SevenZip),
+            "rar" => Some(Self::Rar),
+            "gz" => Some(Self::Gz),
+            "mp4" => Some(Self::Mp4),
+            "avi" => Some(Self::Avi),
+            "wav" => Some(Self::Wav),
+            "mkv" => Some(Self::Mkv),
+            "webp" => Some(Self::Webp),
+            "mp3" => Some(Self::Mp3),
+            "flac" => Some(Self::Flac),
+            "ogg" => Some(Self::Ogg),
+            "psd" => Some(Self::Psd),
+            "tif" | "tiff" => Some(Self::Tiff),
+            "rtf" => Some(Self::Rtf),
+            "tar" => Some(Self::Tar),
+            "iso" => Some(Self::Iso),
+            "sqlite" | "db" => Some(Self::Sqlite),
+            "exe" | "dll" | "sys" => Some(Self::Exe),
+            "txt" | "log" | "rs" | "c" | "cpp" | "py" | "json" | "xml" | "md" => Some(Self::Txt),
+            "pcx" => Some(Self::Pcx),
+            "docx" => Some(Self::Docx),
+            "xlsx" => Some(Self::Xlsx),
+            "pptx" => Some(Self::Pptx),
+            "bz2" => Some(Self::Bz2),
+            "wim" => Some(Self::Wim),
+            "au" => Some(Self::Au),
+            "wma" => Some(Self::Wma),
+            "mov" => Some(Self::Mov),
+            "flv" => Some(Self::Flv),
+            "mpg" | "mpeg" => Some(Self::Mpg),
+            "wmv" => Some(Self::Wmv),
+            _ => None,
+        }
+    }
+
     pub fn header(&self) -> &'static [u8] {
         match self {
             Self::Jpeg => &[0xFF, 0xD8, 0xFF],
@@ -727,7 +770,7 @@ impl SignatureCarver {
         Ok(carved_files)
     }
 
-    fn direct_read_chunk(handle: HANDLE, offset: u64, len: usize, buf: &mut AlignedBuffer) -> std::result::Result<u32, u32> {
+    pub(crate) fn direct_read_chunk(handle: HANDLE, offset: u64, len: usize, buf: &mut AlignedBuffer) -> std::result::Result<u32, u32> {
         unsafe {
             let mut new_pos = 0i64;
             let seek_res = SetFilePointerEx(handle, offset as i64, &mut new_pos, FILE_BEGIN);

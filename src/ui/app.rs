@@ -678,11 +678,13 @@ impl App {
                             KeyCode::Char('s') | KeyCode::Char('S') => {
                                 if self.current_view == CurrentView::Carver && !self.carver_running {
                                     let is_ssd = self.disks.get(self.selected_disk_index).map(|d| matches!(d.bus_type, crate::common::types::BusType::Nvme)).unwrap_or(false);
-                                    let carver = crate::core::recovery::carver::SignatureCarver::new_with_options(
+                                    let mut config = crate::core::recovery::cascade::CascadeConfig::new(
                                         self.carver_dest_path.clone(),
                                         is_ssd,
-                                        self.carver_plaintext_gate,
                                     );
+                                    config.plaintext_gate = self.carver_plaintext_gate;
+                                    config.sparse_enabled = self.imager_sparse;
+                                    let engine = crate::core::recovery::cascade::CascadeRecoveryEngine::new(config);
                                     let (tx, rx) = crossbeam_channel::unbounded();
                                     self.carver_rx = Some(rx);
                                     self.carver_running = true;
@@ -698,9 +700,9 @@ impl App {
                                         self.carver_total_bytes = total_bytes;
                                         self.carver_speed_mb_s = 0.0;
                                         self.carved_files.clear();
-                                        self.carver_status_msg = format!("Carving from image: {}...", source_path_clone.file_name().unwrap_or_default().to_string_lossy());
+                                        self.carver_status_msg = format!("Cascade Recovery (Tier 1 Metadata + Tier 2 Carver): {}...", source_path_clone.file_name().unwrap_or_default().to_string_lossy());
                                         std::thread::spawn(move || {
-                                            if let Err(e) = carver.carve_from_file(&source_path_clone, Some(tx.clone()), Some(pause_flag), Some(cancel_flag)) {
+                                            if let Err(e) = engine.run_from_file(&source_path_clone, Some(tx.clone()), Some(pause_flag), Some(cancel_flag)) {
                                                 let _ = tx.send(crate::core::recovery::carver::CarverEvent::Failed(e.to_string()));
                                             }
                                         });
@@ -716,13 +718,9 @@ impl App {
                                         self.carver_scanned_bytes = start_offset;
                                         self.carver_total_bytes = total_bytes;
                                         self.carver_speed_mb_s = 0.0;
-                                        self.carver_status_msg = if start_offset > 0 {
-                                            format!("Resuming Direct I/O Carver at offset 0x{:X}...", start_offset)
-                                        } else {
-                                            "Starting Direct I/O Carver...".to_string()
-                                        };
+                                        self.carver_status_msg = format!("Cascade Recovery (Tier 1 Metadata + Tier 2 Carver) on Drive {}...", disk_number);
                                         std::thread::spawn(move || {
-                                            if let Err(e) = carver.carve_physical_drive(disk_number, start_offset, total_bytes, Some(tx.clone()), Some(pause_flag), Some(cancel_flag)) {
+                                            if let Err(e) = engine.run_physical_drive(disk_number, total_bytes, Some(tx.clone()), Some(pause_flag), Some(cancel_flag)) {
                                                 let _ = tx.send(crate::core::recovery::carver::CarverEvent::Failed(e.to_string()));
                                             }
                                         });
