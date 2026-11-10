@@ -184,6 +184,7 @@ impl App {
                             self.selected_disk_index,
                             self.telemetry_cache.as_ref(),
                             self.is_elevated,
+                            self.probe_status_msg.as_deref(),
                         );
                     }
                     CurrentView::SurfaceScan => {
@@ -497,7 +498,26 @@ impl App {
                                         if clean_target == clean_input && !disk.is_system_boot {
                                             self.show_safety_modal = false;
                                             let backup_dir = PathBuf::from("./backups");
-                                            let _ = run_sparse_fake_probe(disk, &backup_dir);
+                                            match run_sparse_fake_probe(disk, &backup_dir) {
+                                                Ok(outcome) => {
+                                                    if outcome.is_fake {
+                                                        self.probe_status_msg = Some(format!(
+                                                            "FAKE DRIVE! Physical: {:.2} GB vs Declared: {:.2} GB. {}",
+                                                            outcome.verified_capacity_bytes as f64 / 1e9,
+                                                            outcome.declared_capacity_bytes as f64 / 1e9,
+                                                            outcome.anomaly.unwrap_or_default()
+                                                        ));
+                                                    } else {
+                                                        self.probe_status_msg = Some(format!(
+                                                            "GENUINE: {:.2} GB capacity verified safe.",
+                                                            outcome.verified_capacity_bytes as f64 / 1e9
+                                                        ));
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    self.probe_status_msg = Some(format!("Fake Probe Error: {}", e));
+                                                }
+                                            }
                                         } else {
                                             self.modal_error = true;
                                         }

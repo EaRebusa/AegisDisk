@@ -16,6 +16,7 @@ pub fn render_dashboard(
     selected_index: usize,
     telemetry: Option<&DriveTelemetry>,
     is_elevated: bool,
+    probe_status: Option<&str>,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -365,14 +366,23 @@ pub fn render_dashboard(
     f.render_widget(advice_para, right_chunks[2]);
 
     // 4. Function keys bar
-    let nav_text = Line::from(vec![
+    let mut nav_spans = vec![
         Span::styled(" [F1: Dashboard] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::styled(" [F2: Surface Map] ", Style::default().fg(Color::White)),
         Span::styled(" [F3: Fake Prober] ", Style::default().fg(Color::Yellow)),
         Span::styled(" [F4: Imager] ", Style::default().fg(Color::LightBlue)),
         Span::styled(" [F5: Carver] ", Style::default().fg(Color::Magenta)),
         Span::styled(" [Tab: Next Disk] ", Style::default().fg(Color::DarkGray)),
-    ]);
+    ];
+    if let Some(msg) = probe_status {
+        let color = if msg.starts_with("FAKE") || msg.starts_with("Fake Probe Error") {
+            Color::Red
+        } else {
+            Color::Green
+        };
+        nav_spans.push(Span::styled(format!(" | Probe: {}", msg), Style::default().fg(color).add_modifier(Modifier::BOLD)));
+    }
+    let nav_text = Line::from(nav_spans);
     let nav_para = Paragraph::new(nav_text).block(Block::default().borders(Borders::ALL));
     f.render_widget(nav_para, chunks[3]);
 }

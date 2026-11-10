@@ -5,7 +5,7 @@ use std::path::Path;
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, GENERIC_READ, GENERIC_WRITE,
 };
 use windows_sys::Win32::Security::{
     GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
@@ -13,15 +13,16 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::{
     BusTypeAta, BusTypeNvme, BusTypeSata, BusTypeScsi, BusTypeUsb, CreateFileW, GetDiskFreeSpaceExW,
     GetVolumeInformationW, ReadFile, SetFilePointerEx, WriteFile, FILE_BEGIN, FILE_FLAG_NO_BUFFERING,
-    FILE_FLAG_WRITE_THROUGH, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES,
+    FILE_READ_ATTRIBUTES,
     FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Ioctl::{
-    DISK_GEOMETRY_EX, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, IOCTL_STORAGE_GET_DEVICE_NUMBER,
-    IOCTL_STORAGE_QUERY_PROPERTY, PropertyStandardQuery, StorageAccessAlignmentProperty,
-    StorageDeviceProperty, STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR, STORAGE_DEVICE_DESCRIPTOR,
-    STORAGE_DEVICE_NUMBER, STORAGE_PROPERTY_QUERY,
+    DISK_GEOMETRY_EX, FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+    IOCTL_DISK_UPDATE_PROPERTIES, IOCTL_STORAGE_GET_DEVICE_NUMBER, IOCTL_STORAGE_QUERY_PROPERTY,
+    PropertyStandardQuery, StorageAccessAlignmentProperty, StorageDeviceProperty,
+    STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR, STORAGE_DEVICE_DESCRIPTOR, STORAGE_DEVICE_NUMBER,
+    STORAGE_PROPERTY_QUERY,
 };
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -371,12 +372,12 @@ pub fn open_direct_io_handle(disk_number: u32, write_access: bool) -> Result<Saf
     let wide_path = to_wide_chars(&path);
 
     let access = if write_access {
-        FILE_GENERIC_READ | FILE_GENERIC_WRITE
+        GENERIC_READ | GENERIC_WRITE
     } else {
-        FILE_GENERIC_READ
+        GENERIC_READ
     };
 
-    let flags = FILE_FLAG_NO_BUFFERING | if write_access { FILE_FLAG_WRITE_THROUGH } else { 0 };
+    let flags = FILE_FLAG_NO_BUFFERING;
 
     unsafe {
         let handle = CreateFileW(
@@ -395,6 +396,103 @@ pub fn open_direct_io_handle(disk_number: u32, write_access: bool) -> Result<Saf
         }
 
         Ok(SafeHandle(handle))
+    }
+}
+
+/// RAII guard holding locks on all active volumes mounted on a physical disk.
+/// Automatically releases volume locks and remounts when dropped.
+pub struct DiskVolumeLockGuard {
+    pub _handles: Vec<SafeHandle>,
+}
+
+pub fn lock_and_dismount_disk_volumes(disk_number: u32) -> DiskVolumeLockGuard {
+    let mut locked_handles = Vec::new();
+
+    for letter in b'A'..=b'Z' {
+        let vol_path = format!("\\\\.\\{}:", letter as char);
+        let wide_path = to_wide_chars(&vol_path);
+
+        unsafe {
+            let check_handle = CreateFileW(
+                wide_path.as_ptr(),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                ptr::null(),
+                OPEN_EXISTING,
+                0,
+                ptr::null_mut(),
+            );
+
+            if check_handle == INVALID_HANDLE_VALUE {
+                continue;
+            }
+
+            let mut dev_num = std::mem::zeroed::<STORAGE_DEVICE_NUMBER>();
+            let mut bytes_returned = 0u32;
+            let res = DeviceIoControl(
+                check_handle,
+                IOCTL_STORAGE_GET_DEVICE_NUMBER,
+                ptr::null(),
+                0,
+                &mut dev_num as *mut _ as *mut _,
+                std::mem::size_of::<STORAGE_DEVICE_NUMBER>() as u32,
+                &mut bytes_returned,
+                ptr::null_mut(),
+            );
+
+            CloseHandle(check_handle);
+
+            if res != 0 && dev_num.DeviceNumber == disk_number {
+                tracing::info!("Volume {}: detected on PhysicalDrive{}. Locking and dismounting...", letter as char, disk_number);
+
+                let lock_handle = CreateFileW(
+                    wide_path.as_ptr(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    ptr::null(),
+                    OPEN_EXISTING,
+                    0,
+                    ptr::null_mut(),
+                );
+
+                if lock_handle != INVALID_HANDLE_VALUE {
+                    let mut unused = 0u32;
+                    let lock_res = DeviceIoControl(
+                        lock_handle,
+                        FSCTL_LOCK_VOLUME,
+                        ptr::null(),
+                        0,
+                        ptr::null_mut(),
+                        0,
+                        &mut unused,
+                        ptr::null_mut(),
+                    );
+                    if lock_res == 0 {
+                        tracing::warn!("Warning: FSCTL_LOCK_VOLUME on {}: returned error {}", letter as char, GetLastError());
+                    }
+
+                    let dismount_res = DeviceIoControl(
+                        lock_handle,
+                        FSCTL_DISMOUNT_VOLUME,
+                        ptr::null(),
+                        0,
+                        ptr::null_mut(),
+                        0,
+                        &mut unused,
+                        ptr::null_mut(),
+                    );
+                    if dismount_res == 0 {
+                        tracing::warn!("Warning: FSCTL_DISMOUNT_VOLUME on {}: returned error {}", letter as char, GetLastError());
+                    }
+
+                    locked_handles.push(SafeHandle(lock_handle));
+                }
+            }
+        }
+    }
+
+    DiskVolumeLockGuard {
+        _handles: locked_handles,
     }
 }
 
@@ -506,6 +604,9 @@ pub fn restore_partition_snapshot(disk_number: u32, snapshot_file: &Path) -> Res
         ));
     }
 
+    // Lock and dismount any active volumes so kernel accepts raw writes to LBA 0-63
+    let _vol_locks = lock_and_dismount_disk_volumes(disk_number);
+
     let handle_guard = open_direct_io_handle(disk_number, true)?;
     let handle = handle_guard.0;
 
@@ -532,6 +633,40 @@ pub fn restore_partition_snapshot(disk_number: u32, snapshot_file: &Path) -> Res
                 format!("Failed writing LBA 0-63 during restore: Win32 error {}", err),
             ));
         }
+
+        // Restore backup GPT if present in snapshot file
+        let backup_bytes = 33 * sector_size;
+        if data.len() >= header_bytes + backup_bytes && disk.geometry.total_bytes >= backup_bytes as u64 {
+            let offset = disk.geometry.total_bytes - backup_bytes as u64;
+            let aligned_offset = (offset / sector_size as u64) * sector_size as u64;
+
+            let mut backup_buf = AlignedBuffer::new(backup_bytes, disk.alignment.physical_sector_size as usize);
+            backup_buf.as_mut_slice().copy_from_slice(&data[header_bytes..header_bytes + backup_bytes]);
+
+            let mut backup_pos = 0i64;
+            SetFilePointerEx(handle, aligned_offset as i64, &mut backup_pos, FILE_BEGIN);
+            let mut backup_written = 0u32;
+            WriteFile(
+                handle,
+                backup_buf.as_ptr() as *const _,
+                backup_buf.len() as u32,
+                &mut backup_written,
+                ptr::null_mut(),
+            );
+        }
+
+        // Tell Windows kernel to re-enumerate partition table
+        let mut unused = 0u32;
+        DeviceIoControl(
+            handle,
+            IOCTL_DISK_UPDATE_PROPERTIES,
+            ptr::null(),
+            0,
+            ptr::null_mut(),
+            0,
+            &mut unused,
+            ptr::null_mut(),
+        );
     }
 
     Ok(())

@@ -30,6 +30,9 @@ pub fn run_sparse_fake_probe(
         return Err(AegisError::SystemDiskProtected(disk.disk_number));
     }
 
+    // Step 0: Lock & Dismount mounted volumes to permit direct sector writes in Windows kernel
+    let _vol_locks = crate::hal::windows::lock_and_dismount_disk_volumes(disk.disk_number);
+
     // Step 1: Automatic Pre-Execution Partition Snapshot
     tracing::info!("Taking pre-execution partition snapshot...");
     let _snapshot = create_partition_snapshot(disk.disk_number, backup_dir)?;
@@ -78,11 +81,13 @@ where
     let baseline_offset = 64 * sector_size as u64; // Baseline anchor at LBA 64 (safely past GPT array)
 
     // Write baseline anchor
+    tracing::info!("Writing baseline anchor block at offset {} bytes (LBA 64)...", baseline_offset);
     generate_probe_block(write_buf.as_mut_slice(), baseline_offset);
     write_fn(baseline_offset, write_buf)?;
 
     while step < declared_bytes {
         let probe_offset = (step + (16 * sector_size as u64)).min(declared_bytes - block_size as u64);
+        tracing::info!("Probing sparse boundary offset {:.2} GB ({} bytes)...", probe_offset as f64 / 1e9, probe_offset);
 
         // 1. Write signed pattern to high target offset
         generate_probe_block(write_buf.as_mut_slice(), probe_offset);
@@ -155,9 +160,79 @@ where
         step *= 2;
     }
 
+    // Always test the high-capacity end boundary (declared_bytes - block_size) if not already verified
+    let end_probe_offset = declared_bytes.saturating_sub(block_size as u64);
+    if end_probe_offset > baseline_offset && end_probe_offset > verified_bytes {
+        tracing::info!("Probing final declared boundary at {:.2} GB ({} bytes)...", end_probe_offset as f64 / 1e9, end_probe_offset);
+        generate_probe_block(write_buf.as_mut_slice(), end_probe_offset);
+        write_fn(end_probe_offset, write_buf)?;
+
+        read_fn(baseline_offset, read_buf)?;
+        match verify_probe_block(read_buf.as_slice(), baseline_offset) {
+            PatternVerification::Valid => {}
+            PatternVerification::WrapAroundOverwrite { written_for_offset } => {
+                return Ok(FakeProbeOutcome {
+                    declared_capacity_bytes: declared_bytes,
+                    verified_capacity_bytes: verified_bytes,
+                    is_fake: true,
+                    anomaly: Some(format!(
+                        "Wrap-around detected! Writing to final boundary {:.2} GB overwrote anchor LBA at {:.2} GB.",
+                        written_for_offset as f64 / 1e9,
+                        baseline_offset as f64 / 1e9
+                    )),
+                });
+            }
+            other => {
+                return Ok(FakeProbeOutcome {
+                    declared_capacity_bytes: declared_bytes,
+                    verified_capacity_bytes: verified_bytes,
+                    is_fake: true,
+                    anomaly: Some(format!("Baseline anchor corrupted during end probe: {:?}", other)),
+                });
+            }
+        }
+
+        read_fn(end_probe_offset, read_buf)?;
+        match verify_probe_block(read_buf.as_slice(), end_probe_offset) {
+            PatternVerification::Valid => {
+                verified_bytes = end_probe_offset;
+            }
+            PatternVerification::BlackHoleZeros => {
+                return Ok(FakeProbeOutcome {
+                    declared_capacity_bytes: declared_bytes,
+                    verified_capacity_bytes: verified_bytes,
+                    is_fake: true,
+                    anomaly: Some(format!(
+                        "Black-hole drop detected at final boundary {:.2} GB: Sector returned pure 0x00.",
+                        end_probe_offset as f64 / 1e9
+                    )),
+                });
+            }
+            PatternVerification::BlackHoleOnes => {
+                return Ok(FakeProbeOutcome {
+                    declared_capacity_bytes: declared_bytes,
+                    verified_capacity_bytes: verified_bytes,
+                    is_fake: true,
+                    anomaly: Some(format!(
+                        "Black-hole drop detected at final boundary {:.2} GB: Sector returned pure 0xFF.",
+                        end_probe_offset as f64 / 1e9
+                    )),
+                });
+            }
+            other => {
+                return Ok(FakeProbeOutcome {
+                    declared_capacity_bytes: declared_bytes,
+                    verified_capacity_bytes: verified_bytes,
+                    is_fake: true,
+                    anomaly: Some(format!("Verification anomaly at final boundary {:.2} GB: {:?}", end_probe_offset as f64 / 1e9, other)),
+                });
+            }
+        }
+    }
+
     Ok(FakeProbeOutcome {
         declared_capacity_bytes: declared_bytes,
-        verified_capacity_bytes: declared_bytes,
+        verified_capacity_bytes: if verified_bytes == end_probe_offset { declared_bytes } else { verified_bytes },
         is_fake: false,
         anomaly: None,
     })
