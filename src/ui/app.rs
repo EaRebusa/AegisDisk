@@ -17,7 +17,7 @@ use crate::ui::views::{
     carver_view::render_carver_view,
     dashboard::render_dashboard,
     imager_view::render_imager_view,
-    modal::render_safety_modal,
+    modal::{render_probe_outcome_modal, render_safety_modal},
     surface_view::render_surface_view,
 };
 
@@ -95,6 +95,8 @@ pub struct App {
     pub modal_error: bool,
     #[allow(dead_code)]
     pub probe_status_msg: Option<String>,
+    pub show_probe_modal: bool,
+    pub probe_modal_result: Option<Result<crate::core::surface::probe::FakeProbeOutcome, String>>,
 }
 
 impl App {
@@ -151,6 +153,8 @@ impl App {
             modal_serial_input: String::new(),
             modal_error: false,
             probe_status_msg: None,
+            show_probe_modal: false,
+            probe_modal_result: None,
         };
 
         app.refresh_selected_telemetry();
@@ -285,6 +289,15 @@ impl App {
                             &self.modal_serial_input,
                             self.modal_error,
                         );
+                    }
+                }
+
+                // If Fake Probe Outcome Report is active, render report modal over top
+                if self.show_probe_modal {
+                    if let Some(disk) = self.disks.get(self.selected_disk_index) {
+                        if let Some(ref res) = self.probe_modal_result {
+                            render_probe_outcome_modal(f, area, disk, res);
+                        }
                     }
                 }
             })?;
@@ -475,6 +488,17 @@ impl App {
                             continue;
                         }
 
+                        if self.show_probe_modal {
+                            match key.code {
+                                KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => {
+                                    self.show_probe_modal = false;
+                                    self.probe_modal_result = None;
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+
                         if self.show_safety_modal {
                             // Modal Input Handling
                             match key.code {
@@ -498,14 +522,15 @@ impl App {
                                         if clean_target == clean_input && !disk.is_system_boot {
                                             self.show_safety_modal = false;
                                             let backup_dir = PathBuf::from("./backups");
-                                            match run_sparse_fake_probe(disk, &backup_dir) {
+                                            let res = run_sparse_fake_probe(disk, &backup_dir);
+                                            match &res {
                                                 Ok(outcome) => {
                                                     if outcome.is_fake {
                                                         self.probe_status_msg = Some(format!(
                                                             "FAKE DRIVE! Physical: {:.2} GB vs Declared: {:.2} GB. {}",
                                                             outcome.verified_capacity_bytes as f64 / 1e9,
                                                             outcome.declared_capacity_bytes as f64 / 1e9,
-                                                            outcome.anomaly.unwrap_or_default()
+                                                            outcome.anomaly.as_deref().unwrap_or_default()
                                                         ));
                                                     } else {
                                                         self.probe_status_msg = Some(format!(
@@ -518,6 +543,8 @@ impl App {
                                                     self.probe_status_msg = Some(format!("Fake Probe Error: {}", e));
                                                 }
                                             }
+                                            self.probe_modal_result = Some(res.map_err(|e| e.to_string()));
+                                            self.show_probe_modal = true;
                                         } else {
                                             self.modal_error = true;
                                         }
