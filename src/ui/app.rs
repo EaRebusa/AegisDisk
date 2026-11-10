@@ -163,7 +163,9 @@ impl App {
 
     pub fn refresh_selected_telemetry(&mut self) {
         if let Some(disk) = self.disks.get(self.selected_disk_index) {
-            if let Ok(guard) = open_direct_io_handle(disk.disk_number, false) {
+            let guard_res = open_direct_io_handle(disk.disk_number, true)
+                .or_else(|_| open_direct_io_handle(disk.disk_number, false));
+            if let Ok(guard) = guard_res {
                 self.telemetry_cache = query_telemetry(guard.0, disk.disk_number, &disk.bus_type).ok();
             } else {
                 self.telemetry_cache = None;

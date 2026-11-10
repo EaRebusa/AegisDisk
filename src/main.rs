@@ -171,7 +171,8 @@ fn execute_cli_command(cmd: Commands) -> anyhow::Result<()> {
                 println!(" Serial: {} | Bus: {:?}", serial, bus);
                 println!("============================================================");
 
-                let handle_res = hal::windows::open_direct_io_handle(disk, false);
+                let handle_res = hal::windows::open_direct_io_handle(disk, true)
+                    .or_else(|_| hal::windows::open_direct_io_handle(disk, false));
                 match handle_res {
                     Ok(handle_guard) => {
                         match core::telemetry::query_telemetry(handle_guard.0, disk, &bus) {
