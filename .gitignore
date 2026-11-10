@@ -2,6 +2,8 @@
 /target/
 **/*.rs.bk
 *.pdb
+*.o
+*.res
 
 # Development & AI Prompt/Context Specifications (Confidential/Internal)
 GEMINI.md
