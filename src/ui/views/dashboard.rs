@@ -92,7 +92,8 @@ pub fn render_dashboard(
         Block::default()
             .borders(Borders::ALL)
             .title(format!(
-                " AegisDisk v0.1.0 ──── [{}] ── [Q: Quit] ",
+                " AegisDisk v{} ──── [{}] ── [Q: Quit] ",
+                env!("CARGO_PKG_VERSION"),
                 if is_elevated { "ADMIN ELEVATED" } else { "UNPRIVILEGED" }
             )),
     );

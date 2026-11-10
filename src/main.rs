@@ -10,7 +10,7 @@ mod ui;
 
 #[derive(Parser)]
 #[command(name = "aegisdisk")]
-#[command(about = "AegisDisk: Storage Health, Triage & Recovery CLI/TUI", version = "0.1.0")]
+#[command(about = "AegisDisk: Storage Health, Triage & Recovery CLI/TUI", version = env!("CARGO_PKG_VERSION"))]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,

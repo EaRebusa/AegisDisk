@@ -1,5 +1,9 @@
 # AegisDisk 🛡️💾
 
+<p align="center">
+  <img src="aegisdisk.png" alt="AegisDisk Logo" width="220" />
+</p>
+
 [![License: MIT/Apache-2.0](https://img.shields.io/badge/License-MIT%2FApache--2.0-blue.svg)](LICENSE)
 [![Platform: Windows x86_64](https://img.shields.io/badge/Platform-Windows%20x86__64-brightgreen.svg)]()
 [![Rust Edition: 2024](https://img.shields.io/badge/Rust-2024%20Nightly%2FStable-orange.svg)]()
